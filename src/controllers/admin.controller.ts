@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
-import { burnPartialRtp, mintPartialAcc, matureProject, getOnChainRtpBalance } from "../lib/ethers";
+import { partialMatureProject } from "../lib/ethers";
 
 class AdminController {
   async matureProject(req: Request, res: Response) {
@@ -44,133 +44,101 @@ class AdminController {
         return;
       }
 
-      // Get all RTP holders for this project
-      const { data: rtpHolders } = await supabase
+      const { data: ptHolders } = await supabase
         .from("user_token_balances")
         .select("*")
         .eq("property_id", propertyId)
-        .eq("token_type", "RTP");
+        .eq("token_type", "PT");
 
       let totalConverted = 0;
-
-      // Calculate total to convert
-      for (const holder of (rtpHolders ?? [])) {
+      for (const holder of (ptHolders ?? [])) {
         const convertAmount = (holder.balance * actualPercent) / (100 - currentMaturity);
         if (convertAmount > 0) totalConverted += convertAmount;
       }
 
-      if (totalConverted <= 0) {
-        // No RTP holders -- just update maturity percentage
-        await supabase
-          .from("property_data")
-          .update({ maturity_percentage: newMaturity, is_mature: newMaturity >= 100 })
-          .eq("id", propertyId);
+      const txHash = await partialMatureProject(propertyId, actualPercent);
+      console.log("ON-CHAIN: partialMature tx:", txHash);
 
-        res.status(200).json({
-          success: true,
-          message: `Maturity updated to ${newMaturity.toFixed(1)}%. No token holders to convert.`,
-          maturityPercentage: newMaturity,
-          converted: 0,
-          burnTxHash: "",
-          mintTxHash: "",
-        });
-        return;
-      }
-
-      // --- ON-CHAIN: Burn partial RTP from company wallet ---
-      let burnTxHash = "";
-      try {
-        const onChainBalance = await getOnChainRtpBalance(propertyData.token_address);
-        const burnAmount = Math.min(totalConverted, onChainBalance);
-        if (burnAmount > 0.0001) {
-          burnTxHash = await burnPartialRtp(propertyData.token_address, burnAmount);
-          console.log(`ON-CHAIN: Burned ${burnAmount} RTP, tx: ${burnTxHash}`);
-        }
-      } catch (chainErr: any) {
-        console.log("On-chain RTP burn failed:", chainErr.message);
-      }
-
-      // --- ON-CHAIN: Mint partial ACC to company wallet ---
-      let mintTxHash = "";
-      try {
-        mintTxHash = await mintPartialAcc(totalConverted);
-        console.log(`ON-CHAIN: Minted ${totalConverted} ACC, tx: ${mintTxHash}`);
-      } catch (chainErr: any) {
-        console.log("On-chain ACC mint failed:", chainErr.message);
-      }
-
-      // --- OFF-CHAIN: Update user balances in Supabase ---
-      for (const holder of (rtpHolders ?? [])) {
+      let totalVccMinted = 0;
+      for (const holder of (ptHolders ?? [])) {
         const convertAmount = (holder.balance * actualPercent) / (100 - currentMaturity);
         if (convertAmount <= 0) continue;
+        totalVccMinted += convertAmount;
 
-        const newRtp = holder.balance - convertAmount;
-        if (newRtp <= 0.001) {
+        const newPt = holder.balance - convertAmount;
+        if (newPt <= 0.001) {
           await supabase.from("user_token_balances").delete().eq("id", holder.id);
         } else {
           await supabase
             .from("user_token_balances")
-            .update({ balance: newRtp, updated_at: new Date().toISOString() })
+            .update({ balance: newPt, updated_at: new Date().toISOString() })
             .eq("id", holder.id);
         }
 
-        const { data: existingAcc } = await supabase
+        const { data: existingVcc } = await supabase
           .from("user_token_balances")
           .select("*")
           .eq("user_id", holder.user_id)
           .eq("property_id", propertyId)
-          .eq("token_type", "ACC")
+          .eq("token_type", "VCC")
           .single();
 
-        if (existingAcc) {
+        if (existingVcc) {
           await supabase
             .from("user_token_balances")
             .update({
-              balance: existingAcc.balance + convertAmount,
+              balance: existingVcc.balance + convertAmount,
               updated_at: new Date().toISOString(),
             })
-            .eq("id", existingAcc.id);
+            .eq("id", existingVcc.id);
         } else {
           await supabase.from("user_token_balances").insert([{
             user_id: holder.user_id,
             property_id: propertyId,
-            token_type: "ACC",
+            token_type: "VCC",
             balance: convertAmount,
           }]);
         }
       }
 
-      // At 100%: also call CreditManager.mature() for pool allocation handling
-      let fullMatureTxHash = "";
-      if (newMaturity >= 100) {
-        try {
-          fullMatureTxHash = await matureProject(propertyId);
-          console.log(`ON-CHAIN: Full maturity triggered, tx: ${fullMatureTxHash}`);
-        } catch (chainErr: any) {
-          console.log("On-chain full mature failed (partial already done):", chainErr.message);
-        }
-      }
-
-      // Update property maturity
       await supabase
         .from("property_data")
         .update({ maturity_percentage: newMaturity, is_mature: newMaturity >= 100 })
         .eq("id", propertyId);
 
-      // Log maturity event
+      const { data: existingAr } = await supabase
+        .from("available_retirements")
+        .select("*")
+        .eq("property_id", propertyId)
+        .single();
+
+      if (existingAr) {
+        await supabase
+          .from("available_retirements")
+          .update({
+            available: existingAr.available + totalVccMinted,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", existingAr.id);
+      } else {
+        await supabase.from("available_retirements").insert([{
+          property_id: propertyId,
+          available: totalVccMinted,
+        }]);
+      }
+
       await supabase.from("maturity_events").insert([{
         property_id: propertyId,
-        total_rtp_burned: totalConverted,
-        total_acc_minted: totalConverted,
-        tx_hash: burnTxHash || mintTxHash || fullMatureTxHash || `cycle-${Date.now()}`,
+        percentage: actualPercent,
+        total_pt_burned: totalConverted,
+        total_vcc_minted: totalVccMinted,
+        tx_hash: txHash,
       }]);
 
       res.status(200).json({
         success: true,
-        message: `Matured ${actualPercent.toFixed(1)}% of project. Total: ${newMaturity.toFixed(1)}%. ${totalConverted.toFixed(2)} RTP burned on-chain, ${totalConverted.toFixed(2)} ACC minted on-chain.`,
-        burnTxHash,
-        mintTxHash,
-        fullMatureTxHash,
+        message: `Matured ${actualPercent.toFixed(1)}%. Total: ${newMaturity.toFixed(1)}%. ${totalConverted.toFixed(2)} PT burned, ${totalVccMinted.toFixed(2)} VCC minted.`,
+        txHash,
         maturityPercentage: newMaturity,
         converted: totalConverted,
       });
@@ -182,7 +150,6 @@ class AdminController {
 
   async getMaturityHistory(req: Request, res: Response) {
     const propertyId = req.params.projectId;
-
     const { data, error } = await supabase
       .from("maturity_events")
       .select("*")
@@ -193,7 +160,6 @@ class AdminController {
       res.status(400).json({ success: false, error: error.message });
       return;
     }
-
     res.json({ success: true, data });
   }
 
@@ -207,7 +173,19 @@ class AdminController {
       res.status(400).json({ success: false, error: error.message });
       return;
     }
+    res.json({ success: true, data });
+  }
 
+  async getAvailableRetirements(_req: Request, res: Response) {
+    const { data, error } = await supabase
+      .from("available_retirements")
+      .select("*, property_data(name, image, type)")
+      .gt("available", 0);
+
+    if (error) {
+      res.status(400).json({ success: false, error: error.message });
+      return;
+    }
     res.json({ success: true, data });
   }
 }

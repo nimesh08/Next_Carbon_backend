@@ -4,8 +4,8 @@ import {
   deletePropertySchema,
   propertyCreateSchema,
 } from "../schemas/property.schema";
-import { createProjectToken, registerProject } from "../lib/ethers";
-import { ethers } from "ethers";
+import { createProjectToken, registerProject, setProjectTokenManager } from "../lib/ethers";
+import { CONFIG } from "../lib/config";
 
 class PropertyController {
   async getAllProperties(_req: Request, res: Response) {
@@ -99,10 +99,12 @@ class PropertyController {
         .substring(0, 5)
         .toUpperCase();
 
+      const maxSupply = data?.availableShares ?? 10000;
       const result = await createProjectToken(
         dbData.id,
         `${data?.name} Carbon Credit`,
-        symbol
+        symbol,
+        maxSupply
       );
       tokenAddress = result.tokenAddress;
 
@@ -111,9 +113,8 @@ class PropertyController {
         .update({ token_address: tokenAddress })
         .eq("id", dbData.id);
 
-      // Register in CreditManager with weight (default 1e18 = 1x)
-      const weightWei = ethers.parseEther((data?.weight ?? 1).toString());
-      await registerProject(dbData.id, weightWei);
+      await setProjectTokenManager(tokenAddress, CONFIG.creditManagerAddress);
+      await registerProject(dbData.id);
     } catch (tokenError) {
       console.log("Token deployment failed (property still created):", tokenError);
     }

@@ -16,4 +16,5 @@ export const CONFIG = {
   creditPoolAddress: process.env.CREDIT_POOL_ADDRESS ?? "",
   actualCreditAddress: process.env.ACTUAL_CREDIT_ADDRESS ?? "",
   secTokenAddress: process.env.SEC_TOKEN_ADDRESS ?? "",
+  retirementCertificateAddress: process.env.RETIREMENT_CERTIFICATE_ADDRESS ?? "",
 };

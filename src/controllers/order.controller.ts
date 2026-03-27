@@ -220,7 +220,7 @@ class OrderController {
             .select("*")
             .eq("user_id", data.userId)
             .eq("property_id", data.propertyId)
-            .eq("token_type", "RTP")
+            .eq("token_type", "PT")
             .single();
 
           if (existingBalance) {
@@ -236,7 +236,7 @@ class OrderController {
               {
                 user_id: data.userId,
                 property_id: data.propertyId,
-                token_type: "RTP",
+                token_type: "PT",
                 balance: data.shares,
               },
             ]);

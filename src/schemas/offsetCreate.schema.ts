@@ -11,7 +11,7 @@ const offsetCreateSchema = z.object({
     message: "Number of credits must be a valid integer",
   }),
   description: z.string({
-    message: "Order currency must be a valid string",
+    message: "Description must be a valid string",
   }),
   beneficiaryAddress: z.string({
     message: "Beneficiary address must be a valid string",

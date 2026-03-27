@@ -2,8 +2,8 @@ import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
 import {
   transferTokensToUser,
-  transferAccToUser,
-  transferSecToUser,
+  transferVccToUser,
+  transferCitToUser,
 } from "../lib/ethers";
 import { tokenRedeemSchema } from "../schemas/token.schema";
 
@@ -43,16 +43,16 @@ class TokenController {
 
       let txHash = "";
 
-      if (data.tokenType === "RTP" && propertyData?.token_address) {
+      if (data.tokenType === "PT" && propertyData?.token_address) {
         txHash = await transferTokensToUser(
           propertyData.token_address,
           data.walletAddress,
           data.amount
         );
-      } else if (data.tokenType === "ACC") {
-        txHash = await transferAccToUser(data.walletAddress, data.amount);
-      } else if (data.tokenType === "SEC") {
-        txHash = await transferSecToUser(data.walletAddress, data.amount);
+      } else if (data.tokenType === "VCC") {
+        txHash = await transferVccToUser(data.walletAddress, data.amount);
+      } else if (data.tokenType === "CIT") {
+        txHash = await transferCitToUser(data.walletAddress, data.amount);
       }
 
       // Deduct from user_token_balances

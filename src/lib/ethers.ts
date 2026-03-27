@@ -7,7 +7,7 @@ const wallet = new ethers.Wallet(CONFIG.privateKey, provider);
 // --------------- ABIs ---------------
 
 const PROJECT_TOKEN_FACTORY_ABI = [
-  "function createToken(string _projectId, string _name, string _symbol) external returns (address)",
+  "function createToken(string _projectId, string _name, string _symbol, uint256 _maxSupply) external returns (address)",
   "function getToken(string _projectId) external view returns (address)",
   "function totalProjects() external view returns (uint256)",
 ];
@@ -20,35 +20,46 @@ const PROJECT_TOKEN_ABI = [
   "function approve(address spender, uint256 amount) external returns (bool)",
   "function setManager(address _manager) external",
   "function projectId() external view returns (string)",
+  "function maxSupply() external view returns (uint256)",
+  "function totalSupply() external view returns (uint256)",
 ];
 
 const CREDIT_POOL_ABI = [
   "function deposit(address _token, uint256 _amount) external",
-  "function withdraw(uint256 _secAmount) external",
-  "function claimActualCredits(uint256 _secAmount) external",
+  "function withdraw(uint256 _citAmount) external",
+  "function claimVCC(uint256 _citAmount) external",
+  "function allocateVcc(uint256 _amount) external",
+  "function registerProject(address _token) external",
   "function registeredTokenCount() external view returns (uint256)",
-  "function accAllocatedToPool() external view returns (uint256)",
+  "function vccInPool() external view returns (uint256)",
 ];
 
 const CREDIT_MANAGER_ABI = [
-  "function registerProject(string _projectId, uint256 _weight) external",
-  "function mature(string _projectId) external",
-  "function offset(address holder, uint256 amount) external",
-  "function mintAcc(address to, uint256 amount) external",
-  "function projects(string) external view returns (address tokenAddress, uint256 weight, bool mature)",
+  "function registerProject(string _projectId) external",
+  "function partialMature(string _projectId, uint256 _percent) external",
+  "function offset(address _holder, uint256 _amount, string _projectId, string _certificateURI) external returns (uint256)",
+  "function mintVcc(address to, uint256 amount) external",
+  "function projects(string) external view returns (address tokenAddress, bool registered)",
 ];
 
-const SEC_TOKEN_ABI = [
+const CIT_TOKEN_ABI = [
   "function balanceOf(address account) external view returns (uint256)",
   "function totalSupply() external view returns (uint256)",
   "function transfer(address to, uint256 amount) external returns (bool)",
 ];
 
-const ACC_TOKEN_ABI = [
+const VCC_TOKEN_ABI = [
   "function balanceOf(address account) external view returns (uint256)",
   "function totalSupply() external view returns (uint256)",
   "function transfer(address to, uint256 amount) external returns (bool)",
   "function approve(address spender, uint256 amount) external returns (bool)",
+];
+
+const RETIREMENT_CERTIFICATE_ABI = [
+  "function certificates(uint256 tokenId) external view returns (uint256 amount, string projectId, uint256 timestamp, address retiree)",
+  "function balanceOf(address owner) external view returns (uint256)",
+  "function tokenURI(uint256 tokenId) external view returns (string)",
+  "function nextTokenId() external view returns (uint256)",
 ];
 
 // --------------- Contract instances ---------------
@@ -71,15 +82,21 @@ const managerContract = new ethers.Contract(
   wallet
 );
 
-const secTokenContract = new ethers.Contract(
+const citTokenContract = new ethers.Contract(
   CONFIG.secTokenAddress,
-  SEC_TOKEN_ABI,
+  CIT_TOKEN_ABI,
   wallet
 );
 
-const accTokenContract = new ethers.Contract(
+const vccTokenContract = new ethers.Contract(
   CONFIG.actualCreditAddress,
-  ACC_TOKEN_ABI,
+  VCC_TOKEN_ABI,
+  wallet
+);
+
+const certificateContract = new ethers.Contract(
+  CONFIG.retirementCertificateAddress,
+  RETIREMENT_CERTIFICATE_ABI,
   wallet
 );
 
@@ -92,12 +109,24 @@ function getProjectTokenContract(tokenAddress: string) {
 export async function createProjectToken(
   projectId: string,
   name: string,
-  symbol: string
+  symbol: string,
+  maxSupply: number
 ): Promise<{ tokenAddress: string; txHash: string }> {
-  const tx = await factoryContract.createToken(projectId, name, symbol);
+  const weiMaxSupply = ethers.parseEther(maxSupply.toString());
+  const tx = await factoryContract.createToken(projectId, name, symbol, weiMaxSupply);
   const receipt = await tx.wait();
   const tokenAddress = await factoryContract.getToken(projectId);
   return { tokenAddress, txHash: receipt.hash };
+}
+
+export async function setProjectTokenManager(
+  tokenAddress: string,
+  managerAddress: string
+): Promise<string> {
+  const ptContract = getProjectTokenContract(tokenAddress);
+  const tx = await ptContract.setManager(managerAddress);
+  const receipt = await tx.wait();
+  return receipt.hash;
 }
 
 // --------------- Minting (on purchase) ---------------
@@ -129,71 +158,54 @@ export async function depositToPool(
   return receipt.hash;
 }
 
-export async function withdrawFromPool(secAmount: number): Promise<string> {
-  const weiAmount = ethers.parseEther(secAmount.toString());
+export async function withdrawFromPool(citAmount: number): Promise<string> {
+  const weiAmount = ethers.parseEther(citAmount.toString());
   const tx = await poolContract.withdraw(weiAmount);
   const receipt = await tx.wait();
   return receipt.hash;
 }
 
-export async function claimActualCreditsFromPool(secAmount: number): Promise<string> {
-  const weiAmount = ethers.parseEther(secAmount.toString());
-  const tx = await poolContract.claimActualCredits(weiAmount);
+export async function claimVccFromPool(citAmount: number): Promise<string> {
+  const weiAmount = ethers.parseEther(citAmount.toString());
+  const tx = await poolContract.claimVCC(weiAmount);
   const receipt = await tx.wait();
   return receipt.hash;
+}
+
+export async function getVccInPool(): Promise<number> {
+  const bal = await poolContract.vccInPool();
+  return parseFloat(ethers.formatEther(bal));
 }
 
 // --------------- Maturity ---------------
 
-export async function matureProject(projectId: string): Promise<string> {
-  const tx = await managerContract.mature(projectId);
-  const receipt = await tx.wait();
-  return receipt.hash;
-}
-
-export async function burnPartialRtp(
-  tokenAddress: string,
-  amount: number
-): Promise<string> {
-  const ptContract = getProjectTokenContract(tokenAddress);
-  const weiAmount = ethers.parseEther(amount.toString());
-  const tx = await ptContract.burnFrom(wallet.address, weiAmount);
-  const receipt = await tx.wait();
-  return receipt.hash;
-}
-
-export async function mintPartialAcc(amount: number): Promise<string> {
-  const weiAmount = ethers.parseEther(amount.toString());
-  const tx = await managerContract.mintAcc(wallet.address, weiAmount);
-  const receipt = await tx.wait();
-  return receipt.hash;
-}
-
-export async function getOnChainRtpBalance(tokenAddress: string): Promise<number> {
-  const ptContract = getProjectTokenContract(tokenAddress);
-  const bal = await ptContract.balanceOf(wallet.address);
-  return parseFloat(ethers.formatEther(bal));
-}
-
-export async function registerProject(
+export async function partialMatureProject(
   projectId: string,
-  weight: bigint
+  percent: number
 ): Promise<string> {
-  const tx = await managerContract.registerProject(projectId, weight);
+  const tx = await managerContract.partialMature(projectId, percent);
   const receipt = await tx.wait();
   return receipt.hash;
 }
 
-// --------------- Offset ---------------
-
-export async function offsetCredits(
-  holder: string,
-  amount: number
-): Promise<string> {
-  const weiAmount = ethers.parseEther(amount.toString());
-  const tx = await managerContract.offset(holder, weiAmount);
+export async function registerProject(projectId: string): Promise<string> {
+  const tx = await managerContract.registerProject(projectId);
   const receipt = await tx.wait();
   return receipt.hash;
+}
+
+// --------------- Offset with NFT Certificate ---------------
+
+export async function offsetWithCertificate(
+  holder: string,
+  amount: number,
+  projectId: string,
+  certificateURI: string
+): Promise<{ txHash: string }> {
+  const weiAmount = ethers.parseEther(amount.toString());
+  const tx = await managerContract.offset(holder, weiAmount, projectId, certificateURI);
+  const receipt = await tx.wait();
+  return { txHash: receipt.hash };
 }
 
 // --------------- Transfer to user wallet (redeem) ---------------
@@ -210,22 +222,22 @@ export async function transferTokensToUser(
   return receipt.hash;
 }
 
-export async function transferAccToUser(
+export async function transferVccToUser(
   userWallet: string,
   amount: number
 ): Promise<string> {
   const weiAmount = ethers.parseEther(amount.toString());
-  const tx = await accTokenContract.transfer(userWallet, weiAmount);
+  const tx = await vccTokenContract.transfer(userWallet, weiAmount);
   const receipt = await tx.wait();
   return receipt.hash;
 }
 
-export async function transferSecToUser(
+export async function transferCitToUser(
   userWallet: string,
   amount: number
 ): Promise<string> {
   const weiAmount = ethers.parseEther(amount.toString());
-  const tx = await secTokenContract.transfer(userWallet, weiAmount);
+  const tx = await citTokenContract.transfer(userWallet, weiAmount);
   const receipt = await tx.wait();
   return receipt.hash;
 }
@@ -241,14 +253,20 @@ export async function getProjectTokenBalance(
   return ethers.formatEther(bal);
 }
 
-export async function getAccBalance(holder: string): Promise<string> {
-  const bal = await accTokenContract.balanceOf(holder);
+export async function getVccBalance(holder: string): Promise<string> {
+  const bal = await vccTokenContract.balanceOf(holder);
   return ethers.formatEther(bal);
 }
 
-export async function getSecBalance(holder: string): Promise<string> {
-  const bal = await secTokenContract.balanceOf(holder);
+export async function getCitBalance(holder: string): Promise<string> {
+  const bal = await citTokenContract.balanceOf(holder);
   return ethers.formatEther(bal);
 }
 
-export { wallet, provider };
+export async function getOnChainPtBalance(tokenAddress: string): Promise<number> {
+  const ptContract = getProjectTokenContract(tokenAddress);
+  const bal = await ptContract.balanceOf(wallet.address);
+  return parseFloat(ethers.formatEther(bal));
+}
+
+export { wallet, provider, factoryContract, poolContract, managerContract, certificateContract };

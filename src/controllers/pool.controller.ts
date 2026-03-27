@@ -3,7 +3,7 @@ import { supabase } from "../lib/supabase";
 import {
   depositToPool,
   withdrawFromPool,
-  claimActualCreditsFromPool,
+  claimVccFromPool,
 } from "../lib/ethers";
 import {
   poolDepositSchema,
@@ -21,26 +21,25 @@ class PoolController {
     }
 
     try {
-      // Check RTP balance
-      const { data: rtpBalance } = await supabase
+      const { data: ptBalance } = await supabase
         .from("user_token_balances")
         .select("*")
         .eq("user_id", data.userId)
         .eq("property_id", data.propertyId)
-        .eq("token_type", "RTP")
+        .eq("token_type", "PT")
         .single();
 
-      if (!rtpBalance || rtpBalance.balance < data.amount) {
+      if (!ptBalance || ptBalance.balance < data.amount) {
         res.status(400).json({
           success: false,
-          error: `Insufficient RTP balance. Available: ${rtpBalance?.balance ?? 0}`,
+          error: `Insufficient PT balance. Available: ${ptBalance?.balance ?? 0}`,
         });
         return;
       }
 
       const { data: propertyData } = await supabase
         .from("property_data")
-        .select("token_address, weight")
+        .select("token_address")
         .eq("id", data.propertyId)
         .single();
 
@@ -51,62 +50,58 @@ class PoolController {
 
       const txHash = await depositToPool(propertyData.token_address, data.amount);
 
-      const secReceived = data.amount * (propertyData.weight ?? 1);
+      const citReceived = data.amount; // 1:1
 
-      // Deduct RTP
-      const newRtp = rtpBalance.balance - data.amount;
-      if (newRtp <= 0) {
-        await supabase.from("user_token_balances").delete().eq("id", rtpBalance.id);
+      // Deduct PT
+      const newPt = ptBalance.balance - data.amount;
+      if (newPt <= 0) {
+        await supabase.from("user_token_balances").delete().eq("id", ptBalance.id);
       } else {
         await supabase
           .from("user_token_balances")
-          .update({ balance: newRtp, updated_at: new Date().toISOString() })
-          .eq("id", rtpBalance.id);
+          .update({ balance: newPt, updated_at: new Date().toISOString() })
+          .eq("id", ptBalance.id);
       }
 
-      // Add SEC balance
-      const { data: existingSec } = await supabase
+      // Add CIT balance
+      const { data: existingCit } = await supabase
         .from("user_token_balances")
         .select("*")
         .eq("user_id", data.userId)
         .eq("property_id", data.propertyId)
-        .eq("token_type", "SEC")
+        .eq("token_type", "CIT")
         .single();
 
-      if (existingSec) {
+      if (existingCit) {
         await supabase
           .from("user_token_balances")
           .update({
-            balance: existingSec.balance + secReceived,
+            balance: existingCit.balance + citReceived,
             updated_at: new Date().toISOString(),
           })
-          .eq("id", existingSec.id);
+          .eq("id", existingCit.id);
       } else {
-        await supabase.from("user_token_balances").insert([
-          {
-            user_id: data.userId,
-            property_id: data.propertyId,
-            token_type: "SEC",
-            balance: secReceived,
-          },
-        ]);
+        await supabase.from("user_token_balances").insert([{
+          user_id: data.userId,
+          property_id: data.propertyId,
+          token_type: "CIT",
+          balance: citReceived,
+        }]);
       }
 
       // Record pool deposit
-      await supabase.from("pool_deposits").insert([
-        {
-          user_id: data.userId,
-          property_id: data.propertyId,
-          amount: data.amount,
-          sec_received: secReceived,
-        },
-      ]);
+      await supabase.from("pool_deposits").insert([{
+        user_id: data.userId,
+        property_id: data.propertyId,
+        amount: data.amount,
+        cit_received: citReceived,
+      }]);
 
       res.status(200).json({
         success: true,
-        message: `Deposited ${data.amount} RTP, received ${secReceived} SEC`,
+        message: `Deposited ${data.amount} PT, received ${citReceived} CIT`,
         txHash,
-        secReceived,
+        citReceived,
       });
     } catch (err) {
       console.log("Pool deposit error:", err);
@@ -123,28 +118,26 @@ class PoolController {
     }
 
     try {
-      // Get all SEC balances for user
-      const { data: secBalances } = await supabase
+      const { data: citBalances } = await supabase
         .from("user_token_balances")
         .select("*")
         .eq("user_id", data.userId)
-        .eq("token_type", "SEC");
+        .eq("token_type", "CIT");
 
-      const totalSec = (secBalances ?? []).reduce((sum, b) => sum + b.balance, 0);
+      const totalCit = (citBalances ?? []).reduce((sum: number, b: any) => sum + b.balance, 0);
 
-      if (totalSec < data.secAmount) {
+      if (totalCit < data.citAmount) {
         res.status(400).json({
           success: false,
-          error: `Insufficient SEC balance. Available: ${totalSec}`,
+          error: `Insufficient CIT balance. Available: ${totalCit}`,
         });
         return;
       }
 
-      const txHash = await withdrawFromPool(data.secAmount);
+      const txHash = await withdrawFromPool(data.citAmount);
 
-      // Proportionally deduct SEC across projects
-      let remaining = data.secAmount;
-      for (const bal of (secBalances ?? [])) {
+      let remaining = data.citAmount;
+      for (const bal of (citBalances ?? [])) {
         if (remaining <= 0) break;
         const deduct = Math.min(bal.balance, remaining);
         const newBal = bal.balance - deduct;
@@ -161,7 +154,7 @@ class PoolController {
 
       res.status(200).json({
         success: true,
-        message: `Withdrew ${data.secAmount} SEC from pool`,
+        message: `Withdrew ${data.citAmount} CIT from pool`,
         txHash,
       });
     } catch (err) {
@@ -170,7 +163,7 @@ class PoolController {
     }
   }
 
-  async claimAcc(req: Request, res: Response) {
+  async claimVcc(req: Request, res: Response) {
     const { success, data, error } = poolClaimSchema.safeParse(req.body);
 
     if (!success) {
@@ -179,27 +172,27 @@ class PoolController {
     }
 
     try {
-      const { data: secBalances } = await supabase
+      const { data: citBalances } = await supabase
         .from("user_token_balances")
         .select("*")
         .eq("user_id", data.userId)
-        .eq("token_type", "SEC");
+        .eq("token_type", "CIT");
 
-      const totalSec = (secBalances ?? []).reduce((sum, b) => sum + b.balance, 0);
+      const totalCit = (citBalances ?? []).reduce((sum: number, b: any) => sum + b.balance, 0);
 
-      if (totalSec < data.secAmount) {
+      if (totalCit < data.citAmount) {
         res.status(400).json({
           success: false,
-          error: `Insufficient SEC balance. Available: ${totalSec}`,
+          error: `Insufficient CIT balance. Available: ${totalCit}`,
         });
         return;
       }
 
-      const txHash = await claimActualCreditsFromPool(data.secAmount);
+      const txHash = await claimVccFromPool(data.citAmount);
 
-      // Deduct SEC, add ACC proportionally
-      let remaining = data.secAmount;
-      for (const bal of (secBalances ?? [])) {
+      // Deduct CIT and add VCC proportionally
+      let remaining = data.citAmount;
+      for (const bal of (citBalances ?? [])) {
         if (remaining <= 0) break;
         const deduct = Math.min(bal.balance, remaining);
         const newBal = bal.balance - deduct;
@@ -213,32 +206,30 @@ class PoolController {
             .eq("id", bal.id);
         }
 
-        // Add ACC for this property
-        const { data: existingAcc } = await supabase
+        // Add VCC for this property
+        const { data: existingVcc } = await supabase
           .from("user_token_balances")
           .select("*")
           .eq("user_id", data.userId)
           .eq("property_id", bal.property_id)
-          .eq("token_type", "ACC")
+          .eq("token_type", "VCC")
           .single();
 
-        if (existingAcc) {
+        if (existingVcc) {
           await supabase
             .from("user_token_balances")
             .update({
-              balance: existingAcc.balance + deduct,
+              balance: existingVcc.balance + deduct,
               updated_at: new Date().toISOString(),
             })
-            .eq("id", existingAcc.id);
+            .eq("id", existingVcc.id);
         } else {
-          await supabase.from("user_token_balances").insert([
-            {
-              user_id: data.userId,
-              property_id: bal.property_id,
-              token_type: "ACC",
-              balance: deduct,
-            },
-          ]);
+          await supabase.from("user_token_balances").insert([{
+            user_id: data.userId,
+            property_id: bal.property_id,
+            token_type: "VCC",
+            balance: deduct,
+          }]);
         }
 
         remaining -= deduct;
@@ -246,7 +237,7 @@ class PoolController {
 
       res.status(200).json({
         success: true,
-        message: `Claimed ${data.secAmount} ACC from pool`,
+        message: `Claimed ${data.citAmount} VCC from pool (FCFS)`,
         txHash,
       });
     } catch (err) {
