@@ -58,6 +58,9 @@ class OffsetController {
         return;
       }
 
+      // Custodial model: company wallet holds VCC on behalf of users.
+      // On-chain burn + NFT mint target the company address; per-user
+      // ownership is tracked in the user_token_balances DB table.
       const certURI = "https://carbon-certs.example.com/" + data.propertyId + "/" + Date.now();
       const { txHash } = await offsetWithCertificate(
         CONFIG.companyAddress,

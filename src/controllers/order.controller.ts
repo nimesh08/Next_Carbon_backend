@@ -4,7 +4,7 @@ import razorpay from "../lib/razorpay";
 import orderCreateSchema from "../schemas/orderCreate.schema";
 import orderVerifySchema from "../schemas/orderVerify.schema";
 import { supabase } from "../lib/supabase";
-import { mintProjectTokens } from "../lib/ethers";
+import { mintProjectTokens, getTokenSupplyInfo } from "../lib/ethers";
 import { CONFIG } from "../lib/config";
 
 class OrderController {
@@ -64,6 +64,17 @@ class OrderController {
         });
 
         return;
+      }
+
+      if (propertyData.token_address) {
+        const { totalSupply, maxSupply } = await getTokenSupplyInfo(propertyData.token_address);
+        if (totalSupply + data.shares > maxSupply) {
+          res.status(400).json({
+            success: false,
+            error: `Sold out: only ${Math.floor(maxSupply - totalSupply)} shares remain mintable on-chain.`,
+          });
+          return;
+        }
       }
 
       const order = await razorpay.orders.create({
@@ -199,10 +210,19 @@ class OrderController {
         ]);
       }
 
-      // Mint RTP (ProjectToken) to company wallet
+      // Mint PT on-chain to company wallet
       let tokenTxHash = "";
       try {
         if (propertyData.token_address) {
+          const { totalSupply, maxSupply } = await getTokenSupplyInfo(propertyData.token_address);
+          if (totalSupply + data.shares > maxSupply) {
+            res.status(400).json({
+              success: false,
+              error: `On-chain mint would exceed max supply (${maxSupply}). Only ${Math.floor(maxSupply - totalSupply)} mintable.`,
+            });
+            return;
+          }
+
           tokenTxHash = await mintProjectTokens(
             propertyData.token_address,
             CONFIG.companyAddress,
@@ -214,7 +234,6 @@ class OrderController {
             .update({ token_tx_hash: tokenTxHash })
             .eq("order_id", data.orderId);
 
-          // Upsert user_token_balances for RTP
           const { data: existingBalance } = await supabase
             .from("user_token_balances")
             .select("*")
@@ -243,7 +262,12 @@ class OrderController {
           }
         }
       } catch (mintError) {
-        console.log("Token minting failed (payment still succeeded):", mintError);
+        console.log("On-chain PT mint failed:", mintError);
+        res.status(500).json({
+          success: false,
+          error: "Payment verified but on-chain token minting failed. Contact support.",
+        });
+        return;
       }
 
       res.status(200).json({

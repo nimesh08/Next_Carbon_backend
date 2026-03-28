@@ -242,6 +242,19 @@ export async function transferCitToUser(
   return receipt.hash;
 }
 
+// --------------- Supply info (for pre-mint cap check) ---------------
+
+export async function getTokenSupplyInfo(
+  tokenAddress: string
+): Promise<{ totalSupply: number; maxSupply: number }> {
+  const pt = getProjectTokenContract(tokenAddress);
+  const [total, max] = await Promise.all([pt.totalSupply(), pt.maxSupply()]);
+  return {
+    totalSupply: parseFloat(ethers.formatEther(total)),
+    maxSupply: parseFloat(ethers.formatEther(max)),
+  };
+}
+
 // --------------- Read-only helpers ---------------
 
 export async function getProjectTokenBalance(

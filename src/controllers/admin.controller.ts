@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import { supabase } from "../lib/supabase";
-import { partialMatureProject } from "../lib/ethers";
+import { partialMatureProject, registerProject, managerContract } from "../lib/ethers";
 
 class AdminController {
   async matureProject(req: Request, res: Response) {
@@ -52,16 +52,32 @@ class AdminController {
 
       let totalConverted = 0;
       for (const holder of (ptHolders ?? [])) {
-        const convertAmount = (holder.balance * actualPercent) / (100 - currentMaturity);
+        const convertAmount = (holder.balance * actualPercent) / 100;
         if (convertAmount > 0) totalConverted += convertAmount;
       }
 
-      const txHash = await partialMatureProject(propertyId, actualPercent);
+      let txHash: string;
+      try {
+        const projectInfo = await managerContract.projects(propertyId);
+        if (!projectInfo.registered) {
+          console.log("Project not registered on-chain, registering:", propertyId);
+          const regTxHash = await registerProject(propertyId);
+          console.log("ON-CHAIN: registerProject tx:", regTxHash);
+        }
+        txHash = await partialMatureProject(propertyId, actualPercent);
+      } catch (chainErr: any) {
+        console.log("ON-CHAIN mature failed:", chainErr.reason || chainErr.message);
+        res.status(500).json({
+          success: false,
+          error: "On-chain maturity failed: " + (chainErr.reason || chainErr.message),
+        });
+        return;
+      }
       console.log("ON-CHAIN: partialMature tx:", txHash);
 
       let totalVccMinted = 0;
       for (const holder of (ptHolders ?? [])) {
-        const convertAmount = (holder.balance * actualPercent) / (100 - currentMaturity);
+        const convertAmount = (holder.balance * actualPercent) / 100;
         if (convertAmount <= 0) continue;
         totalVccMinted += convertAmount;
 
